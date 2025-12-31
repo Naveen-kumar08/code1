@@ -30,7 +30,6 @@ min_thresh = float(args.thresh)
 user_res = args.resolution
 record = args.record
 
-# Check if model file exists
 if not os.path.exists(model_path):
     print('ERROR: Model path is invalid or model was not found.')
     sys.exit(0)
@@ -100,7 +99,7 @@ elif source_type == 'folder':
         _, file_ext = os.path.splitext(file)
         if file_ext in img_ext_list:
             imgs_list.append(file)
-elif source_type == 'video' or source_type == 'usb':
+elif source_type in ['video','usb']:
     cap_arg = img_source if source_type == 'video' else usb_idx
     cap = cv2.VideoCapture(cap_arg)
     if user_res:
@@ -131,15 +130,17 @@ else:
     df = pd.DataFrame(columns=["Timestamp", "Image_Name", "Object_Count", "Detected_Classes", "FPS"])
 
 # -----------------------------
-# 9. Initialize variables for FPS
+# 9. FPS & interval setup
 # -----------------------------
 avg_frame_rate = 0
 frame_rate_buffer = []
 fps_avg_len = 200
 img_count = 0
+last_capture_time = 0
+capture_interval = 3  # seconds
 
 # -----------------------------
-# 10. Begin inference loop
+# 10. Inference loop
 # -----------------------------
 while True:
     t_start = time.perf_counter()
@@ -169,17 +170,15 @@ while True:
         img_name_only = f"frame_{img_count}.jpg"
         img_count += 1
 
-    # Resize if needed
     if resize:
         frame = cv2.resize(frame,(resW,resH))
 
-    # Run YOLO inference
+    # YOLO detection
     results = model(frame, verbose=False)
     detections = results[0].boxes
     object_count = 0
     detected_classes = []
 
-    # Process detections
     for i in range(len(detections)):
         xyxy_tensor = detections[i].xyxy.cpu()
         xyxy = xyxy_tensor.numpy().squeeze()
@@ -199,11 +198,6 @@ while True:
             object_count += 1
             detected_classes.append(classname)
 
-    # Save image with bounding boxes
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    save_name = f"{timestamp_str}_{img_name_only}"
-    cv2.imwrite(os.path.join(output_folder, save_name), frame)
-
     # Calculate FPS
     t_stop = time.perf_counter()
     frame_rate_calc = 1 / (t_stop - t_start)
@@ -212,28 +206,32 @@ while True:
     frame_rate_buffer.append(frame_rate_calc)
     avg_frame_rate = np.mean(frame_rate_buffer)
 
-    # Save to Excel
-    df = pd.concat([df, pd.DataFrame({
-        "Timestamp": [timestamp_str],
-        "Image_Name": [save_name],
-        "Object_Count": [object_count],
-        "Detected_Classes": [", ".join(detected_classes)],
-        "FPS": [avg_frame_rate]
-    })], ignore_index=True)
-    df.to_excel(excel_file, index=False)
+    # --- Capture every 3 seconds if object detected ---
+    current_time = time.time()
+    if (current_time - last_capture_time >= capture_interval) and object_count > 0:
+        timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_name = f"{timestamp_str.replace(':','')}_{img_name_only}"
+        cv2.imwrite(os.path.join(output_folder, save_name), frame)
+
+        # Save to Excel
+        df = pd.concat([df, pd.DataFrame({
+            "Timestamp": [timestamp_str],
+            "Image_Name": [save_name],
+            "Object_Count": [object_count],
+            "Detected_Classes": [", ".join(detected_classes)],
+            "FPS": [avg_frame_rate]
+        })], ignore_index=True)
+        df.to_excel(excel_file, index=False)
+        last_capture_time = current_time
 
     # Display
-    cv2.putText(frame, f'Number of objects: {object_count}', (10,40), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
+    cv2.putText(frame, f'Objects: {object_count}', (10,40), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
     cv2.putText(frame, f'FPS: {avg_frame_rate:.2f}', (10,20), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
-    cv2.imshow('YOLO detection results', frame)
+    cv2.imshow('YOLO Detection', frame)
     if record: recorder.write(frame)
 
     # Key controls
-    if source_type in ['image','folder']:
-        key = cv2.waitKey()
-    else:
-        key = cv2.waitKey(5)
-
+    key = cv2.waitKey(5)
     if key in [ord('q'), ord('Q')]:
         break
     elif key in [ord('s'), ord('S')]:
@@ -242,7 +240,7 @@ while True:
         cv2.imwrite('capture.png', frame)
 
 # -----------------------------
-# 11. Cleanup
+# Cleanup
 # -----------------------------
 print(f'Average pipeline FPS: {avg_frame_rate:.2f}')
 if source_type in ['video','usb']: cap.release()
