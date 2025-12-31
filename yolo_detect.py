@@ -6,25 +6,16 @@ import time
 
 import cv2
 import numpy as np
-import pandas as pd
 from ultralytics import YOLO
+import pandas as pd
 
 # Define and parse user input arguments
-
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', help='Path to YOLO model file (example: "runs/detect/train/weights/best.pt")',
-                    required=True)
-parser.add_argument('--source', help='Image source, can be image file ("test.jpg"), \
-                    image folder ("test_dir"), video file ("testvid.mp4"), or index of USB camera ("usb0")', 
-                    required=True)
-parser.add_argument('--thresh', help='Minimum confidence threshold for displaying detected objects (example: "0.4")',
-                    default=0.5)
-parser.add_argument('--resolution', help='Resolution in WxH to display inference results at (example: "640x480"), \
-                    otherwise, match source resolution',
-                    default=None)
-parser.add_argument('--record', help='Record results from video or webcam and save it as "demo1.avi". Must specify --resolution argument to record.',
-                    action='store_true')
-
+parser.add_argument('--model', help='Path to YOLO model file', required=True)
+parser.add_argument('--source', help='Image/video folder/file or USB camera ("usb0")', required=True)
+parser.add_argument('--thresh', help='Confidence threshold for detections', default=0.5)
+parser.add_argument('--resolution', help='Display resolution WxH', default=None)
+parser.add_argument('--record', help='Record video output as demo1.avi', action='store_true')
 args = parser.parse_args()
 
 # Parse user inputs
@@ -34,20 +25,20 @@ min_thresh = float(args.thresh)
 user_res = args.resolution
 record = args.record
 
-# Check if model file exists and is valid
+# Check if model file exists
 if not os.path.exists(model_path):
-    print('ERROR: Model path is invalid or model was not found.')
+    print('ERROR: Model path is invalid')
     sys.exit(0)
 
-# Load the model
+# Load YOLO model
 model = YOLO(model_path, task='detect')
 labels = model.names
 
-# Create outputs
+# Create output folder for captures
 os.makedirs("captures", exist_ok=True)
 log_data = []
 
-# Parse input source
+# Determine source type
 img_ext_list = ['.jpg','.JPG','.jpeg','.JPEG','.png','.PNG','.bmp','.BMP']
 vid_ext_list = ['.avi','.mov','.mp4','.mkv','.wmv']
 
@@ -55,9 +46,9 @@ if os.path.isdir(img_source):
     source_type = 'folder'
 elif os.path.isfile(img_source):
     _, ext = os.path.splitext(img_source)
-    if ext in img_ext_list:
+    if ext.lower() in img_ext_list:
         source_type = 'image'
-    elif ext in vid_ext_list:
+    elif ext.lower() in vid_ext_list:
         source_type = 'video'
     else:
         print(f'File extension {ext} not supported')
@@ -80,35 +71,28 @@ if record:
     if source_type not in ['video','usb'] or not user_res:
         print('Recording requires video/camera + resolution')
         sys.exit(0)
-    recorder = cv2.VideoWriter(
-        'demo1.avi',
-        cv2.VideoWriter_fourcc(*'MJPG'),
-        30,
-        (resW,resH)
-    )
+    recorder = cv2.VideoWriter('demo1.avi', cv2.VideoWriter_fourcc(*'MJPG'), 30, (resW,resH))
 
 # Load source
 if source_type == 'image':
     imgs_list = [img_source]
 elif source_type == 'folder':
-    imgs_list = [f for f in glob.glob(img_source+'/*') if os.path.splitext(f)[1] in img_ext_list]
+    imgs_list = [f for f in glob.glob(img_source+'/*') if os.path.splitext(f)[1].lower() in img_ext_list]
 elif source_type in ['video','usb']:
     cap = cv2.VideoCapture(img_source if source_type=='video' else usb_idx)
     if user_res:
         cap.set(3, resW)
         cap.set(4, resH)
 
-# Colors
-bbox_colors = [
-    (164,120,87),(68,148,228),(93,97,209),(178,182,133),(88,159,106),
-    (96,202,231),(159,124,168),(169,162,241),(98,118,150),(172,176,184)
-]
+# Choose your bounding box color for bottles (BGR)
+bottle_color = (0, 0, 255)  # Red color for bottle bounding boxes
 
 # FPS tracking
 avg_frame_rate = 0
 frame_rate_buffer = []
 fps_avg_len = 200
 img_count = 0
+frame_idx = 0
 
 # Inference loop
 while True:
@@ -116,12 +100,14 @@ while True:
 
     if source_type in ['image','folder']:
         if img_count >= len(imgs_list):
+            print('All images processed.')
             break
         frame = cv2.imread(imgs_list[img_count])
         img_count += 1
     else:
         ret, frame = cap.read()
         if not ret:
+            print('Video ended or camera disconnected.')
             break
 
     if resize:
@@ -129,32 +115,53 @@ while True:
 
     results = model(frame, verbose=False)
     detections = results[0].boxes
-    object_count = 0
+    bottle_count = 0
+    saved_frame_name = None
 
-    for det in detections:
+    for i, det in enumerate(detections):
         conf = det.conf.item()
-        if conf > min_thresh:
+        classidx = int(det.cls.item())
+        classname = labels[classidx]
+
+        # Only process bottles above confidence threshold
+        if classname.lower() == 'bottle' and conf > min_thresh:
             xmin, ymin, xmax, ymax = det.xyxy.cpu().numpy().astype(int)[0]
-            classidx = int(det.cls.item())
-            classname = labels[classidx]
 
-            color = bbox_colors[classidx % 10]
-            cv2.rectangle(frame,(xmin,ymin),(xmax,ymax),color,2)
-            cv2.putText(frame,f'{classname}:{int(conf*100)}%',
-                        (xmin,ymin-10),cv2.FONT_HERSHEY_SIMPLEX,0.5,color,2)
+            # Draw bounding box
+            cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), bottle_color, 2)
+            cv2.putText(frame, f'{classname}: {int(conf*100)}%',
+                        (xmin, ymin-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, bottle_color, 2)
 
-            object_count += 1
+            bottle_count += 1
 
-            # Save frame
-            cv2.imwrite(f'captures/frame_{int(time.time()*1000)}.png', frame)
+    # Save frame if at least one bottle detected
+    if bottle_count > 0:
+        timestamp = int(time.time()*1000)
+        saved_frame_name = f'captures/frame_{frame_idx}_{timestamp}.png'
+        cv2.imwrite(saved_frame_name, frame)
 
-            # Log
-            log_data.append([
-                time.time(), classname, conf,
-                xmin, ymin, xmax, ymax
-            ])
+    # Log info
+    log_data.append({
+        "timestamp": int(time.time()),
+        "frame_name": saved_frame_name,
+        "bottle_count": bottle_count,
+        "detections": [
+            {
+                "class": labels[int(det.cls.item())],
+                "confidence": det.conf.item(),
+                "xmin": int(det.xyxy.cpu().numpy()[0][0]),
+                "ymin": int(det.xyxy.cpu().numpy()[0][1]),
+                "xmax": int(det.xyxy.cpu().numpy()[0][2]),
+                "ymax": int(det.xyxy.cpu().numpy()[0][3])
+            }
+            for det in detections
+            if labels[int(det.cls.item())].lower() == 'bottle' and det.conf.item() > min_thresh
+        ]
+    })
 
-    # FPS
+    frame_idx += 1
+
+    # FPS calculation
     t_stop = time.perf_counter()
     fps = 1 / max((t_stop - t_start),1e-6)
     frame_rate_buffer.append(fps)
@@ -162,27 +169,39 @@ while True:
         frame_rate_buffer.pop(0)
     avg_frame_rate = np.mean(frame_rate_buffer)
 
-    cv2.putText(frame,f'FPS:{avg_frame_rate:.2f}',(10,20),
-                cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
-    cv2.putText(frame,f'Objects:{object_count}',(10,45),
-                cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
+    cv2.putText(frame,f'FPS:{avg_frame_rate:.2f}',(10,20),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
+    cv2.putText(frame,f'Bottles:{bottle_count}',(10,45),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
 
     cv2.imshow('YOLO detection results', frame)
     if record:
         recorder.write(frame)
 
-    if cv2.waitKey(1) & 0xFF in [ord('q'),ord('Q')]:
+    if cv2.waitKey(1) & 0xFF in [ord('q'), ord('Q')]:
         break
 
-# Save Excel
+# Save log to Excel
 if log_data:
-    df = pd.DataFrame(log_data, columns=[
-        "timestamp","class","confidence","xmin","ymin","xmax","ymax"
-    ])
+    # Flatten data for Excel: one row per detected bottle
+    rows = []
+    for entry in log_data:
+        frame_name = entry["frame_name"]
+        for det in entry["detections"]:
+            rows.append({
+                "timestamp": entry["timestamp"],
+                "frame_name": frame_name,
+                "bottle_count": entry["bottle_count"],
+                "class": det["class"],
+                "confidence": det["confidence"],
+                "xmin": det["xmin"],
+                "ymin": det["ymin"],
+                "xmax": det["xmax"],
+                "ymax": det["ymax"]
+            })
+    df = pd.DataFrame(rows)
     df.to_excel("results.xlsx", index=False)
 
 # Cleanup
-print(f'Average pipeline FPS: {avg_frame_rate:.2f}')
+print(f'Average FPS: {avg_frame_rate:.2f}')
 if source_type in ['video','usb']:
     cap.release()
 if record:
