@@ -1,142 +1,145 @@
 import os
 import sys
-import time
 import argparse
+import glob
+import time
 import cv2
 import numpy as np
+import pandas as pd
 from ultralytics import YOLO
 
-# ==============================
-# ARGUMENT PARSER
-# ==============================
+# -------------------------
+# Arguments
+# -------------------------
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', required=True, help='Path to YOLO model (best.pt)')
-parser.add_argument('--source', required=True, help='Image / video file / usb0')
-parser.add_argument('--conf', type=float, default=0.5, help='Confidence threshold')
-parser.add_argument('--imgsz', type=int, default=640, help='YOLO input size')
-parser.add_argument('--resolution', default=None, help='Camera resolution WxH (example 1280x720)')
-parser.add_argument('--save_dir', default='bbox_crops', help='Bounding box crop save folder')
+parser.add_argument('--model', required=True, help='Path to YOLO model file (e.g., best.pt)')
+parser.add_argument('--source', required=True, help='Image/video source or USB camera (usb0)')
+parser.add_argument('--conf', default=0.5, type=float, help='Confidence threshold')
+parser.add_argument('--save_dir', default='outputs', help='Directory to save crops and excel')
+parser.add_argument('--imgsz', default=640, type=int, help='YOLO input image size')
 args = parser.parse_args()
 
-os.makedirs(args.save_dir, exist_ok=True)
+model_path = args.model
+source = args.source
+conf_thres = args.conf
+save_dir = args.save_dir
+imgsz = args.imgsz
 
-# ==============================
-# LOAD YOLO MODEL
-# ==============================
-if not os.path.exists(args.model):
-    print("❌ Model file not found")
-    sys.exit()
+os.makedirs(save_dir, exist_ok=True)
+crop_dir = os.path.join(save_dir, 'crops')
+os.makedirs(crop_dir, exist_ok=True)
 
-model = YOLO(args.model)
-
-# ==============================
-# SOURCE SETUP
-# ==============================
-if args.source.startswith("usb"):
-    cap = cv2.VideoCapture(int(args.source[3:]))
-
-    if args.resolution:
-        w, h = map(int, args.resolution.split('x'))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-
-    source_type = "camera"
-
-elif os.path.isfile(args.source):
-    ext = os.path.splitext(args.source)[1].lower()
-    if ext in [".jpg", ".jpeg", ".png"]:
-        source_type = "image"
-    else:
-        cap = cv2.VideoCapture(args.source)
-        source_type = "video"
+excel_file = os.path.join(save_dir, 'object_count.xlsx')
+if os.path.exists(excel_file):
+    df = pd.read_excel(excel_file)
 else:
-    print("❌ Invalid source")
+    df = pd.DataFrame(columns=['Filename', 'Class', 'Confidence'])
+
+# -------------------------
+# Load model
+# -------------------------
+model = YOLO(model_path)
+labels = model.names
+
+# -------------------------
+# Source type
+# -------------------------
+img_ext_list = ['.jpg','.jpeg','.png','.bmp']
+vid_ext_list = ['.avi','.mp4','.mov','.mkv']
+
+if os.path.isdir(source):
+    source_type = 'folder'
+elif os.path.isfile(source):
+    _, ext = os.path.splitext(source)
+    if ext.lower() in img_ext_list:
+        source_type = 'image'
+    elif ext.lower() in vid_ext_list:
+        source_type = 'video'
+    else:
+        print("Unsupported file")
+        sys.exit()
+elif 'usb' in source:
+    source_type = 'usb'
+    usb_idx = int(source[3:])
+else:
+    print("Invalid source")
     sys.exit()
 
-# ==============================
-# MAIN LOOP
-# ==============================
-frame_id = 0
+# -------------------------
+# Initialize capture
+# -------------------------
+if source_type == 'video' or source_type == 'usb':
+    cap = cv2.VideoCapture(usb_idx if source_type=='usb' else source)
 
+# -------------------------
+# Inference loop
+# -------------------------
+img_count = 0
 while True:
-
-    if source_type == "image":
-        frame = cv2.imread(args.source)
-        if frame is None:
+    if source_type == 'image' or source_type == 'folder':
+        if img_count >= len(glob.glob(os.path.join(source,'*'))):
             break
+        img_files = [f for f in glob.glob(os.path.join(source,'*')) if os.path.splitext(f)[1].lower() in img_ext_list]
+        frame = cv2.imread(img_files[img_count])
+        filename = os.path.basename(img_files[img_count])
+        img_count += 1
     else:
         ret, frame = cap.read()
         if not ret:
             break
+        filename = f"frame_{img_count}.jpg"
+        img_count += 1
 
-    frame_id += 1
-    orig_h, orig_w = frame.shape[:2]
+    # -------------------------
+    # YOLO inference
+    # -------------------------
+    results = model(frame, imgsz=imgsz, conf=conf_thres, verbose=False)
+    detections = results[0].boxes
+    object_count = 0
 
-    # ------------------------------
-    # YOLO INPUT RESIZE ONLY
-    # ------------------------------
-    yolo_img = cv2.resize(frame, (args.imgsz, args.imgsz))
-    scale_x = orig_w / args.imgsz
-    scale_y = orig_h / args.imgsz
+    # -------------------------
+    # Process detections
+    # -------------------------
+    for i in range(len(detections)):
+        xyxy = detections[i].xyxy.cpu().numpy().astype(int).squeeze()
+        cls_id = int(detections[i].cls.cpu().numpy().squeeze())
+        conf_score = float(detections[i].conf.cpu().numpy().squeeze())
+        class_name = labels[cls_id]
 
-    # ------------------------------
-    # INFERENCE
-    # ------------------------------
-    results = model(yolo_img, verbose=False)[0]
+        if conf_score < conf_thres:
+            continue
 
-    if results.boxes is not None:
-        for i, box in enumerate(results.boxes):
+        object_count += 1
 
-            conf = float(box.conf[0])
-            if conf < args.conf:
-                continue
+        # Crop bounding box
+        xmin, ymin, xmax, ymax = xyxy
+        crop_img = frame[ymin:ymax, xmin:xmax]
+        crop_filename = f"{os.path.splitext(filename)[0]}_{class_name}_{object_count}.jpg"
+        cv2.imwrite(os.path.join(crop_dir, crop_filename), crop_img)
 
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+        # Save to dataframe
+        df = pd.concat([df, pd.DataFrame([{'Filename': crop_filename, 'Class': class_name, 'Confidence': conf_score}])], ignore_index=True)
 
-            # 🔁 SCALE BACK TO ORIGINAL FRAME
-            x1 = int(x1 * scale_x)
-            y1 = int(y1 * scale_y)
-            x2 = int(x2 * scale_x)
-            y2 = int(y2 * scale_y)
+        # Draw bounding box
+        color = (0,255,0)
+        cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), color, 2)
+        cv2.putText(frame, f"{class_name}:{int(conf_score*100)}%", (xmin, ymin-5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-            x2 = min(orig_w, x2)
-            y2 = min(orig_h, y2)
-
-            if x2 <= x1 or y2 <= y1:
-                continue
-
-            # ------------------------------
-            # ✅ CROP ONLY BOUNDING BOX AREA
-            # ------------------------------
-            crop = frame[y1:y2, x1:x2]
-            if crop.size > 0:
-                crop_name = f"{args.save_dir}/crop_{frame_id}_{i}.png"
-                cv2.imwrite(crop_name, crop)
-
-            # ------------------------------
-            # DRAW BOUNDING BOX
-            # ------------------------------
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, f"{int(conf*100)}%",
-                        (x1, y1 - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (0, 255, 0), 2)
-
+    # -------------------------
+    # Display
+    # -------------------------
+    cv2.putText(frame, f"Objects: {object_count}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,255),2)
     cv2.imshow("YOLO Detection", frame)
-
-    key = cv2.waitKey(1) & 0xFF
+    key = cv2.waitKey(1)
     if key == ord('q'):
         break
 
-    if source_type == "image":
-        cv2.waitKey(0)
-        break
-
-# ==============================
-# CLEANUP
-# ==============================
-if source_type != "image":
+# -------------------------
+# Cleanup
+# -------------------------
+if source_type == 'video' or source_type == 'usb':
     cap.release()
 cv2.destroyAllWindows()
+df.to_excel(excel_file, index=False)
+print(f"Saved crops in {crop_dir} and object counts in {excel_file}")
