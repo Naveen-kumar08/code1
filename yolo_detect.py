@@ -128,7 +128,7 @@ excel_file = "detection_results.xlsx"
 if os.path.exists(excel_file):
     df = pd.read_excel(excel_file)
 else:
-    df = pd.DataFrame(columns=["Timestamp", "Image_Name", "Object_Count"])
+    df = pd.DataFrame(columns=["Timestamp", "Image_Name", "Object_Count", "Detected_Classes", "FPS"])
 
 # -----------------------------
 # 9. Initialize variables for FPS
@@ -177,6 +177,7 @@ while True:
     results = model(frame, verbose=False)
     detections = results[0].boxes
     object_count = 0
+    detected_classes = []
 
     # Process detections
     for i in range(len(detections)):
@@ -196,22 +197,34 @@ while True:
             cv2.rectangle(frame, (xmin,label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), color, cv2.FILLED)
             cv2.putText(frame, label, (xmin,label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0),1)
             object_count += 1
+            detected_classes.append(classname)
 
     # Save image with bounding boxes
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     save_name = f"{timestamp_str}_{img_name_only}"
     cv2.imwrite(os.path.join(output_folder, save_name), frame)
 
+    # Calculate FPS
+    t_stop = time.perf_counter()
+    frame_rate_calc = 1 / (t_stop - t_start)
+    if len(frame_rate_buffer) >= fps_avg_len:
+        frame_rate_buffer.pop(0)
+    frame_rate_buffer.append(frame_rate_calc)
+    avg_frame_rate = np.mean(frame_rate_buffer)
+
     # Save to Excel
-    df = pd.concat([df, pd.DataFrame({"Timestamp":[timestamp_str],
-                                      "Image_Name":[save_name],
-                                      "Object_Count":[object_count]})], ignore_index=True)
+    df = pd.concat([df, pd.DataFrame({
+        "Timestamp": [timestamp_str],
+        "Image_Name": [save_name],
+        "Object_Count": [object_count],
+        "Detected_Classes": [", ".join(detected_classes)],
+        "FPS": [avg_frame_rate]
+    })], ignore_index=True)
     df.to_excel(excel_file, index=False)
 
     # Display
     cv2.putText(frame, f'Number of objects: {object_count}', (10,40), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
-    if source_type in ['video','usb','picamera']:
-        cv2.putText(frame, f'FPS: {avg_frame_rate:.2f}', (10,20), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
+    cv2.putText(frame, f'FPS: {avg_frame_rate:.2f}', (10,20), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
     cv2.imshow('YOLO detection results', frame)
     if record: recorder.write(frame)
 
@@ -227,14 +240,6 @@ while True:
         cv2.waitKey()
     elif key in [ord('p'), ord('P')]:
         cv2.imwrite('capture.png', frame)
-
-    # Calculate FPS
-    t_stop = time.perf_counter()
-    frame_rate_calc = 1 / (t_stop - t_start)
-    if len(frame_rate_buffer) >= fps_avg_len:
-        frame_rate_buffer.pop(0)
-    frame_rate_buffer.append(frame_rate_calc)
-    avg_frame_rate = np.mean(frame_rate_buffer)
 
 # -----------------------------
 # 11. Cleanup
